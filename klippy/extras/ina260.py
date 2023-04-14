@@ -6,9 +6,15 @@
 import logging
 from . import bus
 
+import random
+
 REPORT_TIME = .8
 BME280_CHIP_ADDR = 0x76
 INA260_CHIP_ADDR = 0x40
+
+CURRENT_CONSTANT = 1.25
+VOLTAGE_CONSTANT = 0.00125
+POWER_CONSTANT = 10
 
 
 INA260_REGS = {
@@ -22,6 +28,9 @@ INA260_REGS = {
     'DIE_UID': 0xFF,       # DIE UNIQUE ID REGISTER (R)
 }
 
+INA_CHIP_ID_REG = 0xFE
+INA_CONFIG_CONTINUOS = 0x111
+
 INA219_REGS = {
     'CONFIG': 0x00,        # CONFIGURATION REGISTER (R/W)
     'VOLTAGE': 0x01,       # SHUNT VOLTAGE REGISTER (R)
@@ -29,6 +38,11 @@ INA219_REGS = {
     'POWER': 0x03,         # POWER REGISTER (R)
     'CURRENT': 0x04,       # CURRENT REGISTER (R)
     'CALIBRATION': 0x05,   # CALIBRATION REGISTER (R/W)
+}
+
+INA_CHIPS = {
+    0x54: 'INA260', 0x60: 'INA219'
+
 }
 
 
@@ -115,39 +129,42 @@ def get_signed_byte(bits):
     return get_twos_complement(bits, 8)
 
 
-class BME280:
+class INA2601:
+
     def __init__(self, config):
+        logging.info("INA260 init")
         self.printer = config.get_printer()
         self.name = config.get_name().split()[-1]
         self.reactor = self.printer.get_reactor()
+
         self.i2c = bus.MCU_I2C_from_config(
-            config, default_addr=BME280_CHIP_ADDR, default_speed=100000)
-        self.mcu = self.i2c.get_mcu()
+            config, default_addr=INA260_CHIP_ADDR, default_speed=100000)
+        # self.mcu = self.i2c.get_mcu()
+
         self.iir_filter = config.getint('bme280_iir_filter', 1)
         self.os_temp = config.getint('bme280_oversample_temp', 2)
         self.os_hum = config.getint('bme280_oversample_hum', 2)
         self.os_pres = config.getint('bme280_oversample_pressure', 2)
-        self.gas_heat_temp = config.getint('bme280_gas_target_temp', 320)
-        self.gas_heat_duration = config.getint('bme280_gas_heat_duration', 150)
-        logging.info("BMxx80: Oversampling: Temp %dx Humid %dx Pressure %dx" % (
-            pow(2, self.os_temp - 1), pow(2, self.os_hum - 1),
-            pow(2, self.os_pres - 1)))
-        logging.info("BMxx80: IIR: %dx" % (pow(2, self.iir_filter) - 1))
 
-        self.temp = self.pressure = self.humidity = self.gas = self.t_fine = 0.
-        self.min_temp = self.max_temp = self.range_switching_error = 0.
+        self.bus_voltage = 0.
+        self.current = 0.
+        self.power = 0.
+        self.min_temp = 0.
+        self.max_temp = 0.
+
+        # self.min_temp = self.max_temp = self.range_switching_error = 0.
         self.max_sample_time = None
         self.dig = self.sample_timer = None
-        self.chip_type = 'BMP280'
-        self.chip_registers = BME280_REGS
-        self.printer.add_object("bme280 " + self.name, self)
+        self.chip_type = 'INA260'
+        self.chip_registers = INA260_REGS
+        self.printer.add_object("ina260 " + self.name, self)
         if self.printer.get_start_args().get('debugoutput') is not None:
             return
         self.printer.register_event_handler("klippy:connect",
                                             self.handle_connect)
 
     def handle_connect(self):
-        self._init_bmxx80()
+        self._init_ina2xx()
         self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
 
     def setup_minmax(self, min_temp, max_temp):
@@ -160,7 +177,96 @@ class BME280:
     def get_report_time_delta(self):
         return REPORT_TIME
 
-    def _init_bmxx80(self):
+    def read_register(self, reg_name, read_len):
+        # read a single register
+        regs = [self.chip_registers[reg_name]]
+        params = self.i2c.i2c_read(regs, read_len)
+        return bytearray(params['response'])
+
+    def write_register(self, reg_name, data):
+        if type(data) is not list:
+            data = [data]
+        reg = self.chip_registers[reg_name]
+        data.insert(0, reg)
+        self.i2c.i2c_write(data)
+
+    def read_id(self):
+        # read chip id register
+        regs = [INA260_REGS["MFG_UID"]]
+        params = self.i2c.i2c_read(regs, 1)
+        return bytearray(params['response'])[0]
+
+    def get_status(self, eventtime):
+        self.bus_voltage = round(random.uniform(0, 24), 2)
+        self.current = round(random.uniform(0, 2), 2)
+        self.power = self.bus_voltage * self.current
+
+        data = {
+            'temperature': round(self.bus_voltage, 2),
+            'busvoltage': round(self.bus_voltage, 2),
+            'current': round(self.current, 2),
+            'power': round(self.power, 2)
+        }
+        return data
+
+    def _init_ina2xx(self):
+        pass
+
+
+# def load_config_prefix(config):
+#     return INA260(config)
+
+
+class INA260:
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.name = config.get_name().split()[-1]
+        self.reactor = self.printer.get_reactor()
+        self.i2c = bus.MCU_I2C_from_config(
+            config, default_addr=INA260_CHIP_ADDR, default_speed=100000)
+        self.mcu = self.i2c.get_mcu()
+        self.iir_filter = config.getint('bme280_iir_filter', 1)
+        self.os_temp = config.getint('bme280_oversample_temp', 2)
+        self.os_hum = config.getint('bme280_oversample_hum', 2)
+        self.os_pres = config.getint('bme280_oversample_pressure', 2)
+        self.gas_heat_temp = config.getint('bme280_gas_target_temp', 320)
+        self.gas_heat_duration = config.getint('bme280_gas_heat_duration', 150)
+        logging.info("BMxx80: Oversampling: Temp %dx Humid %dx Pressure %dx" % (
+            pow(2, self.os_temp - 1), pow(2, self.os_hum - 1),
+            pow(2, self.os_pres - 1)))
+        logging.info("BMxx80: IIR: %dx" % (pow(2, self.iir_filter) - 1))
+
+        self.bus_voltage = 0.
+        self.current = 0.
+        self.power = 0.
+
+        self.temp = self.pressure = self.humidity = self.gas = self.t_fine = 0.
+        self.min_temp = self.max_temp = self.range_switching_error = 0.
+        self.max_sample_time = None
+        self.dig = self.sample_timer = None
+        self.chip_type = 'INA260'
+        self.chip_registers = INA260_REGS
+        self.printer.add_object("ina260 " + self.name, self)
+        if self.printer.get_start_args().get('debugoutput') is not None:
+            return
+        self.printer.register_event_handler("klippy:connect",
+                                            self.handle_connect)
+
+    def handle_connect(self):
+        self._init_ina260()
+        self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
+
+    def setup_minmax(self, min_temp, max_temp):
+        self.min_temp = min_temp
+        self.max_temp = max_temp
+
+    def setup_callback(self, cb):
+        self._callback = cb
+
+    def get_report_time_delta(self):
+        return REPORT_TIME
+
+    def _init_ina260(self):
         def read_calibration_data_bmp280(calib_data_1):
             dig = {}
             dig['T1'] = get_unsigned_short(calib_data_1[0:2])
@@ -223,86 +329,92 @@ class BME280:
             return dig
 
         chip_id = self.read_id()
-        if chip_id not in BME_CHIPS.keys():
-            logging.info("bme280: Unknown Chip ID received %#x" % chip_id)
+        if chip_id not in INA_CHIPS.keys():
+            logging.info("ina260: Unknown Chip ID received %#x" % chip_id)
         else:
-            self.chip_type = BME_CHIPS[chip_id]
-            logging.info("bme280: Found Chip %s at %#x" % (
+            self.chip_type = INA_CHIPS[chip_id]
+            logging.info("ina: Found Chip %s at %#x" % (
                 self.chip_type, self.i2c.i2c_address))
 
         # Reset chip
-        self.write_register('RESET', [RESET_CHIP_VALUE])
-        self.reactor.pause(self.reactor.monotonic() + .5)
+        # self.write_register('RESET', [RESET_CHIP_VALUE])
+        # self.reactor.pause(self.reactor.monotonic() + .5)
 
         # Make sure non-volatile memory has been copied to registers
-        status = self.read_register('STATUS', 1)[0]
-        while status & STATUS_IM_UPDATE:
-            self.reactor.pause(self.reactor.monotonic() + .01)
-            status = self.read_register('STATUS', 1)[0]
+        # status = self.read_register('STATUS', 1)[0]
+        # while status & STATUS_IM_UPDATE:
+        #     self.reactor.pause(self.reactor.monotonic() + .01)
+        #     status = self.read_register('STATUS', 1)[0]
 
-        if self.chip_type == 'BME680':
-            self.max_sample_time = 0.5
-            self.sample_timer = self.reactor.register_timer(
-                self._sample_bme680)
-            self.chip_registers = BME680_REGS
-        else:
-            self.max_sample_time = \
-                (1.25 + (2.3 * self.os_temp) + ((2.3 * self.os_pres) + .575)
-                 + ((2.3 * self.os_hum) + .575)) / 1000
-            self.sample_timer = self.reactor.register_timer(
-                self._sample_bme280)
-            self.chip_registers = BME280_REGS
+        # self.max_sample_time = 10 / 1000
+        self.max_sample_time = 10 / 1000  # magic
 
-        if self.chip_type in ('BME680', 'BME280'):
-            self.write_register('CONFIG', (self.iir_filter & 0x07) << 2)
+        if self.chip_type == 'INA260':
+            self.sample_timer = self.reactor.register_timer(
+                self._sample_ina260)
+            self.chip_registers = INA260_REGS
+
+        # if self.chip_type in ('BME680', 'BME280'):
+        #     self.write_register('CONFIG', (self.iir_filter & 0x07) << 2)
 
         # Read out and calculate the trimming parameters
-        cal_1 = self.read_register('CAL_1', 26)
-        cal_2 = self.read_register('CAL_2', 16)
-        if self.chip_type == 'BME280':
-            self.dig = read_calibration_data_bme280(cal_1, cal_2)
-        elif self.chip_type == 'BMP280':
-            self.dig = read_calibration_data_bmp280(cal_1)
-        elif self.chip_type == 'BME680':
-            self.dig = read_calibration_data_bme680(cal_1, cal_2)
+        # cal_1 = self.read_register('CAL_1', 26)
+        # cal_2 = self.read_register('CAL_2', 16)
+        # if self.chip_type == 'BME280':
+        #     self.dig = read_calibration_data_bme280(cal_1, cal_2)
+        # elif self.chip_type == 'BMP280':
+        #     self.dig = read_calibration_data_bmp280(cal_1)
+        # elif self.chip_type == 'BME680':
+        #     self.dig = read_calibration_data_bme680(cal_1, cal_2)
 
-    def _sample_bme280(self, eventtime):
+    def _sample_ina260(self, eventtime):
         # Enter forced mode
-        if self.chip_type == 'BME280':
-            self.write_register('CTRL_HUM', self.os_hum)
-        meas = self.os_temp << 5 | self.os_pres << 2 | MODE
-        self.write_register('CTRL_MEAS', meas)
+        # if self.chip_type == 'BME280':
+        #     self.write_register('CTRL_HUM', self.os_hum)
+        # meas = self.os_temp << 5 | self.os_pres << 2 | MODE
+        # self.write_register('CTRL_MEAS', meas)
 
         try:
             # wait until results are ready
-            status = self.read_register('STATUS', 1)[0]
-            while status & STATUS_MEASURING:
-                self.reactor.pause(
-                    self.reactor.monotonic() + self.max_sample_time)
-                status = self.read_register('STATUS', 1)[0]
+            self.reactor.pause(
+                self.reactor.monotonic() + self.max_sample_time)
 
-            if self.chip_type == 'BME280':
-                data = self.read_register('PRESSURE_MSB', 8)
-            elif self.chip_type == 'BMP280':
-                data = self.read_register('PRESSURE_MSB', 6)
-            else:
-                return self.reactor.NEVER
+            _raw_voltage = self.read_register('BUSVOLTAGE', 2)
+            _raw_current = self.read_register('CURRENT', 2)
+            _raw_power = self.read_register('POWER', 2)
+            # _raw_config = self.read_register('MASK_ENABLE', 2)
+
+            # config_register_int = int.from_bytes(
+            #     _raw_config, byteorder='big', signed=False)
+            # config_register_binary_string = format(config_register_int, "016b")
+
+            # logging.info("ina260: register response: %s" %
+            #              config_register_binary_string)
+
         except Exception:
-            logging.exception("BME280: Error reading data")
-            self.temp = self.pressure = self.humidity = .0
+            logging.exception("INA260: Error reading data")
+            self.bus_voltage = .0
+            self.current = .0
+            self.power = .0
             return self.reactor.NEVER
 
-        temp_raw = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
-        self.temp = self._compensate_temp(temp_raw)
-        pressure_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
-        self.pressure = self._compensate_pressure_bme280(pressure_raw) / 100.
-        if self.chip_type == 'BME280':
-            humid_raw = (data[6] << 8) | data[7]
-            self.humidity = self._compensate_humidity_bme280(humid_raw)
-        if self.temp < self.min_temp or self.temp > self.max_temp:
-            self.printer.invoke_shutdown(
-                "BME280 temperature %0.1f outside range of %0.1f:%.01f"
-                % (self.temp, self.min_temp, self.max_temp))
+        self.bus_voltage = int.from_bytes(
+            _raw_voltage, byteorder='big', signed=False) * VOLTAGE_CONSTANT
+        self.current = int.from_bytes(
+            _raw_current, byteorder='big', signed=True) * CURRENT_CONSTANT
+        self.power = int.from_bytes(
+            _raw_power, byteorder='big', signed=False) * POWER_CONSTANT
+
+        # pressure_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
+        # self.pressure = self._compensate_pressure_bme280(pressure_raw) / 100.
+        # if self.chip_type == 'BME280':
+        #     humid_raw = (data[6] << 8) | data[7]
+        #     self.humidity = self._compensate_humidity_bme280(humid_raw)
+        # if self.temp < self.min_temp or self.temp > self.max_temp:
+        #     self.printer.invoke_shutdown(
+        #         "BME280 temperature %0.1f outside range of %0.1f:%.01f"
+        #         % (self.temp, self.min_temp, self.max_temp))
+
         measured_time = self.reactor.monotonic()
         self._callback(self.mcu.estimated_print_time(measured_time), self.temp)
         return measured_time + REPORT_TIME
@@ -482,14 +594,26 @@ class BME280:
 
     def read_id(self):
         # read chip id register
-        regs = [BME_CHIP_ID_REG]
+        regs = [INA_CHIP_ID_REG]
+        logging.info("ina260: Readin Chip ID reg %#x" % INA_CHIP_ID_REG)
+
         params = self.i2c.i2c_read(regs, 1)
+        logging.info("ina260: Readin Chip ID reponse: %#x" %
+                     bytearray(params['response'])[0])
+
         return bytearray(params['response'])[0]
 
     def read_register(self, reg_name, read_len):
         # read a single register
+        # logging.info("ina260: Readin register %#x and len: %d" %
+        #              (self.chip_registers[reg_name], read_len))
+
         regs = [self.chip_registers[reg_name]]
         params = self.i2c.i2c_read(regs, read_len)
+
+        # logging.info("ina260: Readin reponse test: %s" %
+        #              str(params))
+
         return bytearray(params['response'])
 
     def write_register(self, reg_name, data):
@@ -499,19 +623,33 @@ class BME280:
         data.insert(0, reg)
         self.i2c.i2c_write(data)
 
+    # def get_status(self, eventtime):
+    #     data = {
+    #         'temperature': round(self.temp, 2),
+    #         'pressure': self.pressure
+    #     }
+    #     if self.chip_type in ('BME280', 'BME680'):
+    #         data['humidity'] = self.humidity
+    #     if self.chip_type == 'BME680':
+    #         data['gas'] = self.gas
+    #     return data
+
     def get_status(self, eventtime):
+        # self.bus_voltage = round(random.uniform(0, 24), 2)
+        # self.current = round(random.uniform(0, 2), 2)
+        # self.power = self.bus_voltage * self.current
+
         data = {
-            'temperature': round(self.temp, 2),
-            'pressure': self.pressure
+            'temperature': round(random.uniform(20, 300), 2),
+            'busvoltage': round(self.bus_voltage, 2),
+            'current': round(self.current, 2),
+            'power': round(self.power, 2)
         }
-        if self.chip_type in ('BME280', 'BME680'):
-            data['humidity'] = self.humidity
-        if self.chip_type == 'BME680':
-            data['gas'] = self.gas
         return data
 
 
 def load_config(config):
     # Register sensor
     pheaters = config.get_printer().load_object(config, "heaters")
-    pheaters.add_sensor_factory("BME280", BME280)
+    # pheaters.add_sensor_factory("BME280", BME280)
+    pheaters.add_sensor_factory("INA260", INA260)
