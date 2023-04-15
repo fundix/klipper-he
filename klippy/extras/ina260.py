@@ -8,7 +8,9 @@ from . import bus
 
 from extras.adc_temperature import LinearInterpolate
 
-REPORT_TIME = .8
+# REPORT_TIME = .8  # time in sec
+REPORT_TIME = .5  # time in sec
+
 BME280_CHIP_ADDR = 0x76
 INA260_CHIP_ADDR = 0x40
 
@@ -42,7 +44,6 @@ INA219_REGS = {
 
 INA_CHIPS = {
     0x54: 'INA260', 0x60: 'INA219'
-
 }
 
 ######################################################################
@@ -56,6 +57,7 @@ INA_CHIPS = {
 # ]
 # temp, resistance
 INA260 = [
+    (24.5, 7.88),
     (30.1, 8.01),
     (62.5, 8.98),
     (109., 10.38),
@@ -121,6 +123,7 @@ class ProtoPrintTemperature:
         self.resistance = 0.
         self.measured_time = 0
         self.temp = 0
+        self.tempStack = TemperatureStack(150)
 
         self.min_temp = self.max_temp = self.range_switching_error = 0.
         self.max_sample_time = None
@@ -128,8 +131,6 @@ class ProtoPrintTemperature:
         self.dig = self.sample_timer = None
         self.chip_type = 'INA260'
         self.chip_registers = INA260_REGS
-
-        # self._load_config_data(config)
 
         self.printer.add_object("ina260 " + self.name, self)
 
@@ -162,7 +163,7 @@ class ProtoPrintTemperature:
                 self.chip_type, self.i2c.i2c_address))
 
         # self.max_sample_time = 10 / 1000
-        self.max_sample_time = 10 / 1000  # magic
+        self.max_sample_time = 5 / 1000  # magic 5ms
 
         if self.chip_type == 'INA260':
             self.sample_timer = self.reactor.register_timer(
@@ -190,14 +191,16 @@ class ProtoPrintTemperature:
                                           signed=False) * VOLTAGE_CONSTANT
 
         self.current = (int.from_bytes(_raw_current, byteorder='big',
-                                       signed=True) * CURRENT_CONSTANT) / 1000.
+                                       signed=True) * CURRENT_CONSTANT)
+        # / 1000.
 
         self.power = (int.from_bytes(_raw_power, byteorder='big',
-                                     signed=False) * POWER_CONSTANT) / 1000.
+                                     signed=False) * POWER_CONSTANT)
+        # / 1000.
 
-        if (self.power > 0):
-            self.resistance = self.bus_voltage / self.current
-            self.temp = self._calc_temp()
+        if (self.current > 0):
+            self.resistance = (self.bus_voltage * 1000.) / self.current
+            self.temp = self._calc_temp(self.resistance)
         else:
             self.resistance = 0.
             self.temp = 0.
@@ -237,8 +240,8 @@ class ProtoPrintTemperature:
 
         data = {
             'temperature': self.temp,
-            'busvoltage': round(self.bus_voltage, 2),
-            'current': round(self.current, 2),
+            'busvoltage': round(self.bus_voltage, 4),
+            'current': round(self.current, 4),
             'power': round(self.power, 2),
             'calcpower': round(self.current * self.bus_voltage, 2),
             'resistance': round(self.resistance, 2),
@@ -249,17 +252,23 @@ class ProtoPrintTemperature:
     def get_temp(self, eventtime):
         return self.temp, 0.
 
-    def _calc_temp(self):
+    def _calc_temp(self, resistance):
         if (self.current > 0):
             try:
                 # logging.info("ina260 log: %s" % str(self.params))
 
                 li = LinearInterpolate(self.params)
-                temperature = li.reverse_interpolate(self.resistance)
+                temperature = li.reverse_interpolate(resistance)
                 # logging.info("ina260 log res: %0.2f" % self.resistance)
                 # logging.info("ina260 log temp: %0.2f" % temperature)
+                # logging.info("ina260 log monotonic: %0.9f" %
+                #              self.reactor.monotonic())
 
-                return temperature
+                self.tempStack.add_measurement(
+                    self.reactor.monotonic(), temperature)
+
+                # return temperature
+                return self.tempStack.get_temp_average()
 
             except ValueError as e:
                 logging.exception("ina260: %s in %s" % (
@@ -271,6 +280,50 @@ class ProtoPrintTemperature:
         return 0.
 
         # return round(random.uniform(20, 30), 2)
+
+######################################################################
+# helper class for averaging temperature measurements
+######################################################################
+
+
+class TemperatureStack:
+    def __init__(self, size):
+        self.stack = []
+        self.size = size
+
+    def add_measurement(self, time, temp):
+        if len(self.stack) == self.size:
+            self.stack.pop(0)  # Odstraň nejstarší prvek z zásobníku
+        self.stack.append((time, temp))
+
+    def get_stack(self):
+        return self.stack
+
+    def get_temp_average(self, last_n=None):
+
+        count = len(self.stack)
+
+        if last_n is None:
+            last_n = count
+
+        if last_n > count:
+            last_n = count
+
+        if last_n == 0:
+            return None
+
+        # logging.info("ina260 last_n: %d" % last_n)
+
+        total_temperature = 0.
+        stack_n = self.stack[-last_n:]
+
+        for time, temperature in stack_n:
+            total_temperature += temperature
+
+        # logging.info("ina260 last_n: %s" % str(stack_n))
+
+        # return 1.1
+        return total_temperature / len(stack_n)
 
 
 # loads temperature resistance params
