@@ -187,23 +187,24 @@ class ProtoPrintTemperature:
             self.power = .0
             return self.reactor.NEVER
 
-        self.bus_voltage = int.from_bytes(_raw_voltage, byteorder='big',
-                                          signed=False) * VOLTAGE_CONSTANT
+        self.bus_voltage = abs(int.from_bytes(_raw_voltage, byteorder='big',
+                                              signed=False) * VOLTAGE_CONSTANT)
 
-        self.current = (int.from_bytes(_raw_current, byteorder='big',
-                                       signed=True) * CURRENT_CONSTANT)
+        self.current = abs((int.from_bytes(_raw_current, byteorder='big',
+                                           signed=True) * CURRENT_CONSTANT))
         # / 1000.
 
         self.power = (int.from_bytes(_raw_power, byteorder='big',
                                      signed=False) * POWER_CONSTANT)
         # / 1000.
 
-        if (self.current > 0):
+        if self.current > 0.1 and self.bus_voltage > 0.009:
             self.resistance = (self.bus_voltage * 1000.) / self.current
             self.temp = self._calc_temp(self.resistance)
         else:
             self.resistance = 0.
             self.temp = 0.
+            self.current = 0.
 
         self.measured_time = self.reactor.monotonic()
         self._callback(self.mcu.estimated_print_time(
@@ -268,7 +269,7 @@ class ProtoPrintTemperature:
                     self.reactor.monotonic(), temperature)
 
                 # return temperature
-                return self.tempStack.get_temp_average()
+                return self.tempStack.get_temp_average(10)
 
             except ValueError as e:
                 logging.exception("ina260: %s in %s" % (
