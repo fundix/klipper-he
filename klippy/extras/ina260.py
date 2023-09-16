@@ -344,6 +344,18 @@ def _load_config_data(config):
     return params
 
 
+def load_config_prefix(config):
+    pheaters = config.get_printer().load_object(config, "heaters")
+    params = _load_config_data(config)
+    sensor = ProtoPrintTemperature(config, params)
+
+    # func = (lambda config, params=params:
+    #         sensor)
+
+    pheaters.add_sensor_factory(
+        sensor.name, sensor)
+
+
 def load_config(config):
     # Register sensor
     pheaters = config.get_printer().load_object(config, "heaters")
